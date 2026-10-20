@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# bin/ramo - subcommand router for the ramo harness CLI (pure bash).
+# Subcommands: init (alias install) | update | verify | uninstall | version.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# lib resolution: repo checkout first (dev / self-install), installed payload second.
+# A dev checkout never fetches: its payload is the working tree, not a release.
+RAMO_DEV_CHECKOUT=0
+if [[ -f "$SCRIPT_DIR/../lib/common.sh" ]]; then
+  RAMO_LIB="$SCRIPT_DIR/../lib"
+  RAMO_DEV_CHECKOUT=1
+else
+  RAMO_LIB="${RAMO_HOME:-$HOME/.local/share/ramo/current}/lib"
+fi
+[[ -f "$RAMO_LIB/common.sh" ]] || { echo "[ramo] ERROR: lib not found at $RAMO_LIB (set RAMO_HOME or reinstall)" >&2; exit 1; }
+# shellcheck source=lib/common.sh
+source "$RAMO_LIB/common.sh"
+source "$RAMO_LIB/preflight.sh"
+source "$RAMO_LIB/settings.sh"
+source "$RAMO_LIB/seed.sh"
+source "$RAMO_LIB/verify.sh"
+source "$RAMO_LIB/update.sh"
+source "$RAMO_LIB/fetch.sh"
+
+RAMO_ROOT="$(resolve_ramo_home)"
+PAYLOAD="$RAMO_ROOT/harness"
+SCHEMA_FILE="$RAMO_ROOT/harness/schema/harness.json"
+SHARE_ROOT="$(dirname "$RAMO_ROOT")"   # <share>/current -> <share>, where install.sh writes
+
+usage() {
+  cat <<'EOF'
+ramo - DS harness for Claude Code
+
+Usage: ramo <command> [target-dir] [options]
+
+Commands:
+  init [dir]              Fetch the latest release, then seed the harness into a project
+                          (git init when needed -> preflight -> seed -> verify). Alias: install
+  update [dir]            Fetch the latest release, then refresh a seeded project;
+                          user-modified files are preserved and reported, never overwritten
+  verify [dir]            Check seeded assets against MANIFEST (exit 1 lists every gap)
+  uninstall [dir]         Remove ramo-owned files only; user-modified copies are kept
+  version                 Print installed payload version
+
+Options for init and update:
+  --version X.Y.Z         Install that release instead of the latest (pin or roll back)
+  --yes, -y               Install a different version without asking
+  --no-fetch              Do not contact the distribution remote; use the installed release
+  --dry-run               (update only) Report what would change; install and write nothing
+EOF
+}
+
+require_payload() {
+  [[ -d "$PAYLOAD" && -f "$PAYLOAD/MANIFEST" ]] \
+    || die "payload not found at $PAYLOAD (run install.sh, or set RAMO_HOME)"
+}
+
+# parse_args <args...> - flags shared by init and update.
+parse_args() {
+  TARGET="."; PIN_VERSION=""; NO_FETCH=0; ASSUME_YES=0; DRY_RUN=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --version)  PIN_VERSION="${2:?--version requires X.Y.Z}"; PIN_VERSION="${PIN_VERSION#v}"; shift 2 ;;
+      --no-fetch) NO_FETCH=1; shift ;;
+      --yes|-y)   ASSUME_YES=1; shift ;;
+      --dry-run)  DRY_RUN=1; shift ;;
+      -*)         die "unknown option: $1" ;;
+      *)          TARGET="$1"; shift ;;
+    esac
+  done
+}
+
+confirm() {
+  [[ "$ASSUME_YES" == "1" ]] && return 0
+  if [[ ! -t 0 ]]; then
+    error "$1 needs confirmation; re-run with --yes"
+    return 1
+  fi
+  local answer
+  read -r -p "[ramo] $1 [y/N] " answer
+  [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
+# sync_release <command> - brings the installed CLI and payload to the release this command
+# should run on, then re-execs the new CLI, so seeding is always done by the CLI version that
+# owns the payload. Returns when nothing needs installing.
+sync_release() {
+  local cmd="$1"
+  if [[ "$NO_FETCH" == "1" || "${RAMO_FETCH_DONE:-}" == "1" || -n "${RAMO_HOME:-}" \
+        || "$RAMO_DEV_CHECKOUT" == "1" ]]; then
+    [[ -z "$PIN_VERSION" || "${RAMO_FETCH_DONE:-}" == "1" ]] \
+      || die "--version needs an installed ramo that may fetch (not a dev checkout, RAMO_HOME, or --no-fetch)"
+    return 0
+  fi
+  local url current wanted direction=update dir
+  url="$(fetch_remote_url "$SHARE_ROOT")"
+  current="$(tr -d '[:space:]' < "$PAYLOAD/VERSION")"
+  if [[ -n "$PIN_VERSION" ]]; then
+    fetch_version_exists "$url" "$PIN_VERSION" || die "release v$PIN_VERSION not found at $url"
+    wanted="$PIN_VERSION"
+  elif ! wanted="$(fetch_latest_version "$url")"; then
+    warn "could not reach $url to check for a newer release; continuing with installed $current"
+    return 0
+  fi
+  if [[ "$wanted" == "$current" ]]; then
+    info "ramo $current is up to date"
+    return 0
+  fi
+  [[ "$(version_cmp "$wanted" "$current")" == "-1" ]] && direction=rollback
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/ramo-fetch.XXXXXX")" || die "could not create a temp directory"
+  if ! fetch_release "$url" "$wanted" "$dir/release"; then
+    rm -rf "$dir"; die "could not fetch v$wanted from $url"
+  fi
+  info "$direction available: $current -> $wanted"
+  if [[ "$direction" == "update" ]]; then
+    changelog_headings "$dir/release/CHANGELOG.md" "$current" "$wanted"
+  else
+    info "a rollback undoes what was released after $wanted; v$wanted's CHANGELOG does not list it"
+  fi
+  if [[ "$DRY_RUN" == "1" ]]; then
+    rm -rf "$dir"
+    info "dry run: v$wanted not installed; the preview below uses installed $current"
+    return 0
+  fi
+  if ! confirm "install ramo $wanted ($direction from $current)?"; then
+    rm -rf "$dir"; error "nothing changed; ramo $current is still installed"; exit 1
+  fi
+  if ! RAMO_DIST_REMOTE="$url" RAMO_INSTALL_ROOT="$SHARE_ROOT" RAMO_BIN_DIR="$SCRIPT_DIR" \
+       "$dir/release/install.sh"; then
+    rm -rf "$dir"; die "installing v$wanted failed; ramo $current is still installed"
+  fi
+  rm -rf "$dir"
+  # Hand over the target only. A release older than 0.5.0 reads its first argument as the
+  # target, so forwarding --yes or --version would make a rollback fail to seed.
+  RAMO_FETCH_DONE=1 exec "$SCRIPT_DIR/ramo" "$cmd" "$TARGET"
+}
+
+# ensure_git_repo <dir> - git init a plain directory; never / or the home directory.
+ensure_git_repo() {
+  local target="$1" abs
+  resolve_project_root "$target" >/dev/null && return 0
+  [[ -d "$target" ]] || die "$target is not a directory"
+  abs="$(cd "$target" && pwd -P)"
+  if [[ "$abs" == "/" || "$abs" == "$(cd "$HOME" && pwd -P)" ]]; then
+    die "$abs is not a git repository, and ramo will not run 'git init' on / or your home directory; create a project directory first"
+  fi
+  git init -q "$abs" || die "git init failed in $abs"
+  info "$abs was not a git repository; ran 'git init'"
+}
+
+cmd_init() {
+  local target_root
+  parse_args "$@"
+  [[ "$DRY_RUN" == "0" ]] || die "--dry-run applies to 'ramo update' only"
+  require_payload
+  sync_release init
+  [[ -f "$SCHEMA_FILE" ]] || die "schema not found at $SCHEMA_FILE"
+  ensure_git_repo "$TARGET"
+  run_preflight "$TARGET" "$SCHEMA_FILE" || exit 1
+  target_root="$(resolve_project_root "$TARGET")" || die "cannot resolve project root of $TARGET"
+  info "seeding into $target_root"
+  seed_payload "$PAYLOAD" "$target_root" || exit 1
+  verify_target "$PAYLOAD" "$target_root" || { warn "post-init verify reported gaps (see above)"; exit 1; }
+  info "init done. Next: open Claude Code in $target_root and run /ramo:interview"
+}
+
+cmd_update() {
+  local target_root
+  parse_args "$@"
+  require_payload
+  sync_release update
+  target_root="$(resolve_project_root "$TARGET")" || die "cannot resolve project root of $TARGET"
+  update_payload "$PAYLOAD" "$target_root" "$DRY_RUN" || exit 1
+  [[ "$DRY_RUN" == "1" ]] || info "update done. Next: 'ramo verify $target_root' to confirm."
+}
+
+cmd_verify() {
+  local target="${1:-.}" target_root
+  require_payload
+  target_root="$(resolve_project_root "$target")" || die "cannot resolve project root of $target"
+  verify_target "$PAYLOAD" "$target_root"
+}
+
+cmd_uninstall() {
+  local target="${1:-.}" target_root rel removed=0 kept=()
+  require_payload
+  target_root="$(resolve_project_root "$target")" || die "cannot resolve project root of $target"
+  while IFS= read -r rel; do
+    case "$rel" in
+      CLAUDE.md|settings.hooks.json|VERSION) continue ;;
+    esac
+    local dst="$target_root/.claude/$rel"
+    [[ -f "$dst" ]] || continue
+    if cmp -s "$PAYLOAD/$rel" "$dst"; then
+      rm -f "$dst"; removed=$((removed + 1))
+    else
+      kept+=("$dst (locally modified; kept)")
+    fi
+  done < <(manifest_entries "$PAYLOAD/MANIFEST")
+  # strip the ramo-owned marker block from CLAUDE.md
+  if [[ -f "$target_root/CLAUDE.md" ]] && grep -q "BEGIN RAMO-HARNESS" "$target_root/CLAUDE.md"; then
+    python3 - "$target_root/CLAUDE.md" <<'PY'
+import pathlib, re, sys
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+new = re.sub(r"\n?<!-- BEGIN RAMO-HARNESS.*?END RAMO-HARNESS -->\n?", "\n", text, flags=re.S)
+path.write_text(new)
+PY
+  fi
+  remove_settings "$PAYLOAD/settings.hooks.json" "$target_root/.claude/settings.json"
+  rm -f "$target_root/.claude/hooks/ramo/.seed-info"
+  find "$target_root/.claude" -type d -empty -delete 2>/dev/null || true
+  info "uninstalled: $removed file(s) removed. .ramo/ state kept (user data)."
+  if [[ ${#kept[@]} -gt 0 ]]; then
+    warn "kept ${#kept[@]} locally modified file(s):"
+    local k; for k in "${kept[@]}"; do printf '  - %s\n' "$k" >&2; done
+  fi
+  warn "known limit: settings entries identical to ramo's were removed by string match"
+}
+
+cmd_version() {
+  require_payload
+  cat "$PAYLOAD/VERSION"
+}
+
+case "${1:-help}" in
+  init|install) shift; cmd_init "$@" ;;
+  update)    shift; cmd_update "$@" ;;
+  verify)    shift; cmd_verify "$@" ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  version|--version|-v) cmd_version ;;
+  help|--help|-h) usage ;;
+  *) error "unknown command: $1"; usage; exit 1 ;;
+esac

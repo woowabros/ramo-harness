@@ -1,0 +1,29 @@
+{
+  "subtype": "lesson",
+  "path_segment": "lessons",
+  "required_sections": [
+    "요약",
+    "발생 조건",
+    "근본 원인",
+    "재발 방지 계약",
+    "확인 필요 사항",
+    "검증 가능한 출처"
+  ],
+  "conditional_features": {
+    "module_gotcha": {
+      "extra_section": "대상 모듈"
+    },
+    "cross_cutting": {
+      "extra_section": "적용 워크플로"
+    },
+    "failed_approach": {
+      "extra_section": "피해야 할 접근"
+    }
+  },
+  "_outlet_note": "확인 필요 사항 is the uncertainty outlet. An earlier version carried it only in note's required_sections and pushed it onto every other subtype through an authoring rule, which no gate can check. Promoting it to required_sections here makes wiki_runtime.py's required-sections check enforce it mechanically -- the sections under the most fabrication pressure are lesson's 근본 원인 and constraint's 근거, exactly where an author with thin evidence needs somewhere legal to put what is not known.",
+  "optional_sections": [
+    "관찰된 증상",
+    "적용 범위"
+  ],
+  "_required_sections_why": "Cut from 8 to 6. All eight being required drove prose length with nothing gained: real lessons ran long and carried no tables. The six kept are the ones a later session cannot reconstruct -- what recurs, when it fires, why, the contract that stops it, what is still unresolved, and where the claim is checkable. The two moved to optional are derivable from the kept six (관찰된 증상 from 발생 조건, 적용 범위 from 재발 방지 계약). 확인 필요 사항 stays REQUIRED and was not a candidate for the cut: it is the slot a correctly declared absence goes into, which ramo-wiki-writer's anti-patterns call the most valuable thing a lesson can carry, and leaving it to an authoring habit is what no gate can read (wiki_runtime.py validate's required-sections check is what reads it)."
+}

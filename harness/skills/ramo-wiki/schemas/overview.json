@@ -1,0 +1,16 @@
+{
+  "subtype": "overview",
+  "path_segment": "architecture",
+  "required_sections": [
+    "목적과 범위", "데이터 계보", "타깃과 시점 경계", "누수 경계", "분할과 평가 슬라이스",
+    "재현성 축", "핵심 불변식", "확인 필요 사항", "근거와 관련 문서"
+  ],
+  "conditional_features": {
+    "multi_experiment": {"extra_section": "실험 간 공유 경계"},
+    "serving": {"extra_section": "서빙 접점과 롤백"},
+    "external_dependency": {"extra_section": "외부 의존과 실패 정책"}
+  },
+  "_why": "The one wiki document that answers 'what does this pipeline currently look like' rather than 'what did we learn'. In an earlier version's real use this was the only wiki document that kept growing across rounds while every governance category stayed empty, which is evidence that a single current-state entry point is needed before accumulated knowledge is.",
+  "_section_derivation": "The section list is a DS reinterpretation, not a port. An earlier version's 8 required sections were web-service vocabulary (컴포넌트 맵 / 신뢰 경계 / 배포 관점); the four kept in spirit are 목적과 범위, 핵심 불변식, 확인 필요 사항, 근거와 관련 문서. 데이터 계보 / 타깃과 시점 경계 / 누수 경계 / 분할과 평가 슬라이스 / 재현성 축 replace the component-and-deployment half, because those are the things a DS pipeline's reader needs and the things our own reviews keep finding unstated.",
+  "_invariants_note": "핵심 불변식 is a numbered list on purpose: in an earlier version a live defect's structural fix was promoted into exactly that list as a numbered item, so the list is the destination a structural correction gets written to. A prose paragraph has no item to cite."
+}

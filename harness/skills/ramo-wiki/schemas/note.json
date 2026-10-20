@@ -1,0 +1,12 @@
+{
+  "subtype": "note",
+  "path_segment": "notes",
+  "required_sections": [
+    "요약", "목적", "확인된 사실", "확인 필요 사항", "출처"
+  ],
+  "conditional_features": {
+    "research": {"extra_section": "검토 범위와 결론"},
+    "feedback": {"extra_section": "제안과 승인 상태"},
+    "scratch": {"extra_section": "폐기 조건"}
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/ramo/ramo-hook.sh\" session_start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/ramo/ramo-hook.sh\" pre_bash",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/ramo/ramo-hook.sh\" post_write",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/ramo/ramo-hook.sh\" subagent_stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "RAMO_DOCUMENTATION_LANGUAGE": "ko"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(python3 .claude/scripts/ramo-data.py:*)"
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "\"$CLAUDE_PROJECT_DIR/.claude/statusline-ramo.py\"",
+    "padding": 1
+  }
+}

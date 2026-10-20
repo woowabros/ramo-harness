@@ -1,0 +1,440 @@
+{
+  "schema_version": "0.1.0",
+  "_why": "Single machine-readable source of truth for authoring rules. Read by the hook handlers and the skill scripts (stdlib json only, hence JSON not YAML); the handlers mirror the values they need as constants (hooks/ramo/handlers/_common.py), and the mirror is kept in step by hand.",
+
+  "python": {
+    "handler_min_version": "3.9",
+    "_why_handler": "Hook handlers are stdlib-only hot path; 3.9 is the floor shipped by macOS CLT.",
+    "dev_min_version": "3.11"
+  },
+
+  "envelope": {
+    "tag": "ramo",
+    "status_values": ["DONE", "RETRY", "BLOCKED"],
+    "result_block_fence": "result",
+    "fields": {
+      "verdict": {
+        "required": "conditional",
+        "_why": "Value set depends on agent; see agents.<name>.verdict"
+      },
+      "summary": { "required": true, "type": "string" },
+      "artifacts": { "required": true, "type": "list" },
+      "changed_files": {
+        "required": true,
+        "type": "list",
+        "_why": "Advisory self-report only. The deterministic change list is git diff --name-only. Read-only agents must report []."
+      },
+      "concerns": { "required": true, "type": "list" },
+      "blockers": { "required": true, "type": "list" },
+      "retryable": { "required": true, "type": "bool" },
+      "next_step_hint": { "required": true, "type": "string" },
+      "evidence": {
+        "required": "by_task_type",
+        "type": "mapping",
+        "_why": "DS replacement for a code-coverage gate. Missing required keys => mechanical RETRY unless justified in concerns (run skill gate + subagent_stop handler). Enforced on DONE envelopes of implement-class agents only.",
+        "self_declared_task_type_key": "task_type",
+        "_task_type_why": "The hook cannot know the task type; implement-class agents self-declare it inside evidence.task_type, and the orchestrator cross-checks the declaration against the plan's Domain column (second path). The closed set of task types is owned by domains.<name>.evidence, never by this block."
+      }
+    },
+    "evidence": {
+      "task_type_source": "domains.<name>.evidence",
+      "_task_type_source_why": "Each domain declares its own task types and required keys. A domain that is not registered has no contract, so it cannot inherit an empty gate by accident - which is exactly what a global table did when non-DS work declared the fallback below.",
+      "fallback_task_type": "other",
+      "fallback_required_keys": [],
+      "_fallback_why": "Work belonging to no registered domain (docs tasks). Declaring the fallback for work that does belong to a registered domain is a gate bypass, caught by the orchestrator cross-check against the plan's Domain column - model-discipline grade, no mechanical check (the hook is given only the self-declared task_type).",
+      "key_formats": {
+        "seed": { "type": "integer" },
+        "split_boundary": {
+          "type": "string",
+          "_format": "ISO-8601 date/datetime boundary or named split id (e.g. 2026-07-01 / temporal-80-20)"
+        },
+        "data_snapshot": {
+          "type": "string",
+          "_format": "snapshot id, partition spec, or committed snapshot path re-obtainable later",
+          "floating_refs": ["latest", "current_date", "current_timestamp", "now()", "today"],
+          "_invariant": "No floating reference: a value containing any floating_refs word (case-insensitive) resolves to a different partition tomorrow, so it pins nothing. Judged by acceptance.py check and recheck."
+        },
+        "query_hash": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,64}$",
+          "_format": "hex digest (sha256 or prefix >=16 chars) of the normalized extraction SQL",
+          "_normalization": "1. drop every line whose first non-blank characters are `--`; 2. collapse every whitespace run to one space; 3. trim; 4. no case folding (no string-literal-aware tokenizer is needed); 5. a row with several SQL deliverables joins their normalized texts with one newline, in Deliverable column order; 6. sha256 hex. Compared by prefix: the recorded value (16-64 hex chars, per pattern) must be a prefix of the recomputed digest. Computed by skills/ramo-run/scripts/acceptance.py `hash --sql`, the one calculator implementer, run, and verify share."
+        },
+        "feature_spec": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{16,64}$",
+          "_format": "hex digest of the sorted feature-column list plus its transform declarations",
+          "_why": "seed + split_boundary + data_snapshot leave the feature set unpinned, so a rerun with a different feature set passes the gate as reproducible.",
+          "_normalization": "Input is the plan's validity `features` file (one feature per line: name then its transform). 1. drop blank lines and lines starting with `#`; 2. collapse every whitespace run to one space and trim each line; 3. sort the lines; 4. join with one newline; 5. sha256 hex. Compared by prefix, as query_hash. Computed by skills/ramo-run/scripts/acceptance.py `hash --features`."
+        },
+        "dataset_tables": {
+          "type": "string",
+          "pattern": "^.*:(intermediate|experiment).*$",
+          "_format": "comma-separated `[<catalog>.]<schema>.<name>:<retention>` pairs; retention is intermediate | experiment",
+          "_why": "A workspace table with no stated lifetime is nobody's to delete. Several survived a completed experiment in a shared schema holding many other people's tables. The pattern forces the retention word to be present, which is the part that was missing."
+        },
+        "quality_checks": {
+          "type": "string",
+          "pattern": "^[0-9]+/[0-9]+\\b.*$",
+          "_format": "`<passed>/<declared>` followed by the class ids that ran (rules/data/data-quality.md)",
+          "_why": "Counts first so the gate can tell `10/10` from `0/10`. `checks pass` with no numbers is the report shape this replaces.",
+          "_invariant": "passed == declared and declared > 0. `0/0` passed a test drive; the invariant catches it with no plan expectation. Judged by acceptance.py check and recheck."
+        },
+        "row_reconciliation": {
+          "type": "string",
+          "pattern": "^[0-9][0-9,]*\\s*==\\s*[0-9][0-9,]*$",
+          "_format": "`<artifact rows> == <expected source rows>`, both stated",
+          "_why": "Forces the equality to be written out rather than asserted. A silently truncated download is what this catches, and it is invisible in a single number.",
+          "_invariant": "Both sides equal as integers after removing thousands commas. Judged by acceptance.py check and recheck."
+        },
+        "findings_ref": {
+          "type": "string",
+          "_format": "committed path the conclusion lives at (docs/analysis/... or an experiment report)",
+          "_why": "No pattern: the path shape differs per repository. Non-empty is the whole requirement -- the failure being prevented is an analysis whose conclusion was never written down anywhere."
+        },
+        "test_command": {
+          "type": "string",
+          "_format": "the exact command a reader can run to reproduce the pass"
+        },
+        "red_evidence": {
+          "type": "string",
+          "_format": "reference to the observed failure before the fix (test name plus failure line, or commit)"
+        },
+        "coverage_line": {
+          "type": "string",
+          "_format": "coverage figure as reported by the run, with the tool that produced it"
+        }
+      }
+    }
+  },
+
+  "domains": {
+    "_why": "Evidence contracts are owned by the domain. Keys starting with _ are notes, not domains; every other key is a domain and must carry its own contract. The hooks mirror these contracts (hooks/ramo/handlers/_common.py EVIDENCE_TASK_TYPES); a domain with no contract is an authoring error caught at review, and no mechanical check ships for it.",
+    "_domain_vs_plan_column": "This registry is not the plan's Execution Structure `Domain` column. That column's closed set is data|model|docs, where `docs` is a deliverable kind rather than a target domain - rules/docs/ does not exist and docs work owns no evidence contract. The two sets are deliberately different; see rules/workflow/01a-execution-structure.md.",
+    "_not_the_data_block": "The top-level `data` block below is the data access and write-confinement contract, not this registry's `data` entry.",
+    "data": {
+      "rules_index": "rules/data/INDEX.md",
+      "_task_type_boundary": "Three shapes of data work, told apart by what the task leaves behind. data-extraction produces a result someone reads once. dataset-build produces a durable dataset other tasks read, so it owes the table list, the quality checks, and the row reconciliation. data-analysis produces a conclusion, so it owes the place that conclusion lives. Before this split, the second and third both declared data-extraction or `other` -- and `other` requires nothing, which is the empty-gate hole the domain-owned contracts closed for code and had left open here.",
+      "evidence": {
+        "data-extraction": {
+          "required_keys": ["data_snapshot", "query_hash"]
+        },
+        "dataset-build": {
+          "required_keys": ["data_snapshot", "query_hash", "dataset_tables",
+                            "quality_checks", "row_reconciliation"],
+          "_why": "A dataset other tasks build on. The three added keys are the three things a test run left unrecorded: which workspace tables exist and for how long, whether the named quality checks actually ran, and whether the local artifact holds the row count the statement was supposed to produce."
+        },
+        "data-analysis": {
+          "required_keys": ["data_snapshot", "query_hash", "findings_ref"],
+          "_why": "Analysis with no model and no durable dataset. `findings_ref` names where the conclusion lives, because an analysis whose conclusion exists only in a chat reply has to be redone to be used -- and it is the shape most likely to be declared `other` and gated by nothing."
+        }
+      }
+    },
+    "model": {
+      "rules_index": "rules/model/INDEX.md",
+      "evidence": {
+        "model-training": {
+          "required_keys": ["seed", "split_boundary", "data_snapshot", "feature_spec"]
+        }
+      }
+    },
+    "code": {
+      "_status": "This version registers the contract only. The three code agents and rules/code/ are deferred to a later version; a domain's rules INDEX must exist before any grid agent of that domain, so `rules_index` is intentionally absent until then.",
+      "evidence": {
+        "code-change": {
+          "required_keys": ["test_command", "red_evidence", "coverage_line"]
+        }
+      }
+    }
+  },
+
+  "agents": {
+    "directory": "agents/ramo",
+    "name_prefix": "ramo-",
+    "_name_prefix_why": "A bare agent name is shadowed by any personal ~/.claude/agents/<name>.md with the same name -- observed during testing, where a personal `explore` agent masked the harness one and the envelope gate then fired on the wrong agent. Colon namespacing is unavailable: the agents loader keys on the frontmatter `name:` and ignores the directory, and the colon form comes from plugin packaging, which the harness does not use because a marketplace plugin cannot deliver project-scoped hooks. Uniform over selective: a per-name judgement of `is this name generic enough to collide` needs a reviewer every time, and a single prefix is checkable at a glance. Applies to the roster keys and the file names alike, because the hooks key the roster by agent name and the name equals the file stem.",
+    "frontmatter_required": [
+      "name", "description", "model", "permissionMode", "tools",
+      "maxTurns", "color", "effort", "memory"
+    ],
+    "frontmatter_conditional": {
+      "disallowedTools": "required when access == read-only (double lock)"
+    },
+    "frontmatter_forbidden": [
+      "rules", "skills", "hooks", "mcpServers", "isolation", "background", "initialPrompt",
+      "globs", "alwaysApply", "activation_env", "activation_values"
+    ],
+    "field_values": {
+      "model": ["haiku", "sonnet", "opus"],
+      "permissionMode": ["default", "acceptEdits"],
+      "effort": ["low", "medium", "high", "max"],
+      "color": ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"],
+      "memory": ["project"]
+    },
+    "xml_blocks": ["role", "scope", "constraints", "execution_order", "anti_patterns", "output_format"],
+    "bash_hygiene_classes": {
+      "A": { "policy": "block-all" },
+      "B": { "policy": "plain-only" },
+      "C": { "policy": "guidance-only" }
+    },
+    "roster": {
+      "ramo-plan-writer":    { "model": "opus",   "access": "write-partial", "write_scope": ".ramo/plans/*.md", "bash_class": "B", "verdict": null },
+      "ramo-plan-evaluator": { "model": "opus",   "access": "read-only", "bash_class": "A", "verdict": ["APPROVE", "REJECT"] },
+      "ramo-plan-improver":  { "model": "opus",   "access": "write-partial", "write_scope": ".ramo/plans/*.md", "bash_class": "B", "verdict": null },
+      "ramo-critique":       { "model": "opus",   "access": "read-only", "bash_class": "A", "verdict": ["APPROVE", "REJECT"] },
+      "ramo-audit":          { "model": "opus",   "access": "read-only", "bash_class": "A", "verdict": ["APPROVE", "REJECT"] },
+      "ramo-explore":        { "model": "sonnet", "access": "read-only", "bash_class": "B", "verdict": null },
+      "ramo-data-explore":   { "model": "sonnet", "access": "read-only", "bash_class": "B", "verdict": null },
+      "ramo-model-explore":  { "model": "sonnet", "access": "read-only", "bash_class": "B", "verdict": null },
+      "ramo-doc-writer":     { "model": "sonnet", "access": "write-partial", "write_scope": "docs/**", "bash_class": "C", "verdict": null },
+      "ramo-data-design":    { "model": "opus",   "access": "read-only", "bash_class": "B", "verdict": ["APPROVE", "REJECT"], "verdict_required": "only-as-plan-reviewer" },
+      "ramo-data-implement": { "model": "sonnet", "access": "write", "bash_class": "C", "verdict": null },
+      "ramo-data-verify":    { "model": "sonnet", "access": "read-only", "bash_class": "B", "verdict": ["PASS", "FAIL"] },
+      "ramo-model-design":   { "model": "opus",   "access": "read-only", "bash_class": "A", "verdict": ["APPROVE", "REJECT"], "verdict_required": "only-as-plan-reviewer" },
+      "ramo-model-implement": { "model": "sonnet", "access": "write", "bash_class": "C", "verdict": null },
+      "ramo-model-verify":   { "model": "sonnet", "access": "read-only", "bash_class": "B", "verdict": ["PASS", "FAIL"] },
+      "ramo-wiki-writer":    { "model": "sonnet", "access": "read-only", "bash_class": "A", "verdict": null },
+      "ramo-wiki-reviewer":  { "model": "opus",   "access": "read-only", "bash_class": "A", "verdict": ["APPROVE", "REJECT"] },
+      "ramo-wiki-reader":    { "model": "sonnet", "access": "read-only", "bash_class": "A", "verdict": null },
+      "ramo-research-reader": { "model": "sonnet", "access": "read-only", "bash_class": "A", "verdict": null }
+    },
+    "_roster_notes": [
+      "verdict null => the agent omits the verdict field entirely.",
+      "verdict_required only-as-plan-reviewer => the field exists for the plan-review seat; an earlier version removed the execution-time design stage, so the plan review is now the only seat these agents occupy.",
+      "Role axis, not domain axis: the four exploration and audit seats (data-explore, model-explore, audit, wiki-reader) split exploring from reviewing (a design agent used to do both and so reviewed its own map), add the cross-cutting surface no domain reviewer can see, and give the wiki a reader so it stops being write-only. The domain axis stays data|model.",
+      "Validity seats: at verify, ramo-data-verify and ramo-model-verify sit whenever the plan has rows of their domain and judge a closed validity checklist by low-cost re-derivation only (hash recomputation, slice metrics from a prediction file, data-quality re-runs, split-boundary scans); ramo-critique fills the per-row fidelity matrix; ramo-audit reports its five surfaces as audit.* cells. Roster fields are unchanged: the seats changed what they judge, not their access or verdict vocabulary.",
+    "ramo-audit reports APPROVE|REJECT in both its plan-review and verify seats, matching ramo-critique rather than the domain verifiers' PASS|FAIL: it is a judgment seat, and the verify team already carries both vocabularies.",
+      "Grid agents ({data,model} x {design,implement,verify}) are instantiated from a single template; the cross-domain diff budget between them is reviewed at authoring time (no shipped check).",
+      "Domain knowledge lives only under rules/<domain>/; grid expansion requires rules/<domain>/INDEX.md to exist first.",
+      "ramo-data-design is read-only with Bash class B, unlike ramo-model-design (class A): judging a data plan needs the warehouse's actual tables, columns, and partitions, and the data access adapter is a Bash command (python3 .claude/scripts/ramo-data.py). Its body limits Bash to the adapter's read commands; the class B gate keeps those commands plain, and the adapter refuses anything but a single read.",
+      "ramo-research-reader is read-only with Bash class A. It reads fetched web text, the highest-volume injection carrier the harness touches, so its tool set carries neither Bash, WebSearch, nor Write (all in disallowedTools): an injected page can at most distort a report the main session saves to .ramo/research/ and re-reads before writing the topic README. Per-source notes are not committed; the topic README is (rules/workflow/00-research.md)."
+    ]
+  },
+
+  "skills": {
+    "directory": "skills",
+    "name_pattern": "^ramo(-[a-z0-9]+)*$",
+    "frontmatter_required": ["name", "description"],
+    "frontmatter_conditional": {
+      "argument-hint": "required when the skill takes arguments",
+      "allowed-tools": "required for workflow skills"
+    }
+  },
+
+  "rules": {
+    "directory": "rules",
+    "categories_v0": ["common", "workflow", "data", "model"],
+    "categories_v1_reserved": ["analysis", "feature", "pipeline"],
+    "frontmatter_required": ["description"],
+    "paths_style": "block-sequence-double-quoted",
+    "_paths_why": "Runtime accepts 3 notations; we fix one so any checker's parser stays trivial."
+  },
+
+  "commands": {
+    "directory": "commands/ramo",
+    "frontmatter_required": ["description"],
+    "names_v0": ["research", "interview", "eda", "plan", "run", "verify", "diagnose", "doc", "mr"]
+  },
+
+  "hooks": {
+    "shim": "hooks/ramo/ramo-hook.sh",
+    "handlers_dir": "hooks/ramo/handlers",
+    "events": {
+      "SessionStart": { "matcher": null, "handler": "session_start.py", "blocking": false },
+      "PreToolUse": { "matcher": "Bash", "handler": "pre_bash.py", "blocking": true, "kill_switch": "RAMO_BASH_GATE_ENABLED" },
+      "PostToolUse": { "matcher": "Write|Edit", "handler": "post_write.py", "blocking": false },
+      "SubagentStop": { "matcher": null, "handler": "subagent_stop.py", "blocking": true, "kill_switch": "RAMO_ENVELOPE_GATE_ENABLED" }
+    },
+    "_kill_switch_why": "workflow/08-hook-conventions.md requires every blocking gate to carry an environment kill switch, and the switch name belongs here rather than only in the handler: a name that lives as a Python constant alone cannot be checked against the rule promising it, and subagent_stop.py shipped as a blocking gate with no switch at all until this field made the omission visible. Setting the named variable to the string false makes that handler pass everything through with a log entry. Handlers mirror the name; no shipped test compares this block with them, so a blocking event that declares no switch, or names one its handler never reads, is caught only at review.",
+    "exit_codes": { "pass": 0, "block": 2, "_other": "fail-open (non-blocking error)" },
+    "log": {
+      "dir": ".ramo/logs",
+      "file_mode": "0600",
+      "policy": "key-names-only",
+      "forbidden_content": ["values", "output previews", "absolute paths", "cwd", "transcript_path", "PII"]
+    }
+  },
+
+  "doc_frontmatter": {
+    "_why": "Frontmatter contracts per document class. OKF v0.2 alignment for .ramo outputs is owned by the interview/plan/doc skills; each class names the skill or script that enforces it.",
+    "ramo_plan": {
+      "glob": ".ramo/plans/*.md",
+      "required": ["type", "status", "created", "updated", "ticket", "generated"],
+      "status_values": ["draft", "active", "done", "superseded"],
+      "optional": ["parent", "change", "objective"],
+      "_optional_why": "The iteration axis. `parent` is the previous plan's file name or the literal null, `change` is the one atomic difference from the parent, `objective` is the metric name plus the parent's value on it. Optional, not required: a first experiment has no parent, and the required list is a closed set, so changing it is a contract change. What is irreversible here is the corpus rather than the field -- `parent` and `change` exist only while a plan is being written, so adding the fields later cannot give lineage to plans already written. The judge (slice.vs-parent), the `rejected` status, and the search-budget stops are deferred to a later version; this version buys lineage preservation, scored by one plan-rubric item.",
+      "_note": "generated: {by, at} per OKF v0.2; enforced by the plan skill when it writes frontmatter"
+    },
+    "ramo_interview": {
+      "glob": ".ramo/interviews/*.md",
+      "required": ["type", "status", "created", "updated", "generated"],
+      "status_values": ["partial", "complete"],
+      "optional": ["track", "research"],
+      "_research_why": "Path, or comma-separated paths, of the docs/research/<topic>/README.md documents the interview read as background. Optional: the research stage is optional. It lets the plan reach the same topics without a second discovery question.",
+      "_track_values": ["model", "dataset", "analysis"],
+      "_track_why": "Which shape of DS work this is. The data domain is useful without a model -- an analysis or a dataset another task reads -- and three of the six interview dimensions (leakage, metric+slices, baseline) are model-shaped. Recording the track is what lets the interview ask those in the form the work actually has instead of failing to converge, and it tells the plan stage which task types to expect.",
+      "_note": "enforced by ramo-interview skill; status drives Step 0 resume detection"
+    },
+
+    "ramo_eda": {
+      "glob": ".ramo/eda/*.md",
+      "required": ["type", "status", "created", "updated", "generated"],
+      "status_values": ["partial", "complete"],
+      "optional": ["interview", "track"],
+      "_why": "Same volatile-input class as the interview: the plan stage discovers it, reads it as evidence, and it is never cited as durable evidence (SOT-1). status drives ramo-eda Step 0 resume detection; `interview` names the problem-definition artifact this exploration served, so a plan can tell an exploration of its own target from an unrelated one.",
+      "_note": "enforced by the ramo-eda skill; durable promotion is docs/analysis/ via ramo-doc template-eda.md"
+    },
+
+    "research": {
+      "glob": "docs/research/*/README.md",
+      "required": ["type", "title", "kind", "summary", "category", "status", "created", "updated", "tags", "generated"],
+      "optional": ["stale_after", "visual"],
+      "kind_values": ["subject", "service", "cases"],
+      "status_values": ["draft", "stable", "deprecated"],
+      "sections": {
+        "subject": ["전체 아키텍처", "피처와 타깃", "학습 방법", "주의사항", "출처"],
+        "service": ["전체 흐름", "운영 정책", "변경 이력", "주의사항", "출처"],
+        "cases": ["사례 비교", "사례 요약", "주의사항", "출처"]
+      },
+      "depth_values": ["full", "partial", "abstract-only", "failed"],
+      "overview": "docs/research/_overview.md (topic table generated by research_doc.py index; merge=union in .gitattributes)",
+      "_why": "One committed README per topic folder, split by the nature of what was read: a model or codebase studied in depth (subject), a service's flow, operating policy, and history (service), or a set of external cases compared (cases). It is the doc tree's OKF v0.2 frontmatter plus `kind` and the one-line `summary` the overview table shows. The topic table is derived, so parallel researchers each touch only their own folder.",
+      "_note": "enforced by skills/ramo-research/scripts/research_doc.py check and index (mirrors these closed sets; stdlib, seeded) and by the ramo-research skill"
+    },
+
+    "ramo_research": {
+      "glob": ".ramo/research/*.md",
+      "required": ["type", "title", "status", "created", "updated", "generated", "topics"],
+      "status_values": ["partial", "complete"],
+      "_why": "The research run's resume state: research questions, curated sources with their topic, and per-source status. Reader reports sit beside it in .ramo/research/<run>/ and are never committed.",
+      "_note": "enforced by the ramo-research skill; status drives Step 0 resume detection"
+    },
+
+    "ramo_diagnosis": {
+      "glob": ".ramo/diagnoses/*.md",
+      "required": ["type", "status", "created", "updated", "plan", "generated"],
+      "status_values": ["partial", "complete"],
+      "optional": ["experiment"],
+      "_why": "`plan` is required, not optional: a diagnosis that does not name the experiment it diagnoses cannot pre-fill the next plan's iteration axis, which is the only reason this artifact exists. The plan stage reads `plan` as the next plan's `parent`, the metric plus its value as `objective`, and the candidate the user picks as `change`.",
+      "_note": "enforced by the ramo-diagnose skill; durable promotion is docs/analysis/ via ramo-doc template-diagnosis.md"
+    }
+  },
+
+  "data": {
+    "_why": "Data access and write policy. The read path and the write path are different tools with different enforcement grades; both are named here so no asset restates the schema name, the tool, or the grade. Connection facts (engine, database file, table sources) are per project and live in the project's ramo-data.json (git-tracked, user-owned, not seeded), never here; no credential belongs in either place, since the account comes from the environment (CLAUDE.md HARD).",
+    "workspace_schema": "workspace",
+    "_workspace_schema_why": "The one schema a build may write into; every other schema is read-only source data. Matched on the schema segment, not the catalog, because an engine can expose the same schema under more than one catalog (an attached database file, a warehouse catalog), and matching a catalog would miss one of them. This is the default: a project's ramo-data.json `workspace_schema` overrides it for the hooks (hooks/ramo/handlers/_common.py workspace_schema()) and for the adapter alike, so renaming the workspace touches one file.",
+    "read_path": {
+      "tool": "data access adapter .claude/scripts/ramo-data.py (ping | search | schema | partitions | explain | query), one plain Bash command per call",
+      "grade": 2,
+      "_grade_why": "Refused by the adapter, not structurally impossible. Two layers run on every statement: a statement check (exactly one statement, a read keyword first, no write or session keyword outside string literals; anything else exits 3 with BLOCKED) and an engine sandbox (in-memory connection, the project database attached READ_ONLY, file access limited to the declared data directories, extension loading off, configuration locked before the first user statement). The statement check is lexical and the sandbox alone still allows some writes into a data directory, so neither layer is sufficient by itself; an adapter for another engine owes both layers of its own (rules/data/engines/)."
+    },
+    "write_path": {
+      "tool": "build script: a committed .py that writes into the workspace schema of the project DuckDB file (`database` in ramo-data.json), or, for another engine, through that engine's DB-API cursor into its workspace schema. Python orchestrates; SQL does the joins.",
+      "_tool_why": "Name the layer the write actually leaves through (the connection or cursor the script opens), not a wrapper library that happens to sit in front of it: naming a wrapper made a consumer read an absent package as the root cause and spend a task on it.",
+      "grade": 3,
+      "_grade_why": "The statement is issued from inside a script, so no Bash gate can see it. post_write.py flags schema-qualified non-workspace targets in authored .py/.sql at write time (detection, not prevention); verify-rubric audit.write-boundary reviews it at verification time."
+    }
+  },
+
+  "vcs": {
+    "provider": "github",
+    "provider_values": ["github", "gitlab"],
+    "_why": "Which forge the mr stage opens the merge request on: `github` runs `gh pr create`, `gitlab` runs `glab mr create`. One value, so the mr skill and the workflow rule never guess from the remote URL. pre_bash.py gates both creation commands whatever this says, so switching the provider opens no path around the verify PASS marker. Edit it in the seeded copy; a later `ramo update` keeps the edited file and reports it as locally modified, so that release's schema changes are merged by hand."
+  },
+
+  "tracker": {
+    "url_template": "",
+    "_why": "Optional. When a team links work to a ticket tracker, `{TICKET}` in this template is replaced by the plan's ticket key (e.g. PROJ-123) to build a link, as in https://tracker.example.com/browse/{TICKET}. Empty means no links: ticket keys stay optional plain text and no stage depends on them."
+  },
+
+  "plan_blocks": {
+    "_why": "The plan parts a machine reads besides the six-column Execution Structure table (workflow/01b-acceptance-contract.md): the row-to-unit mapping and the unit Checks lines, and the model plan's validity block. In earlier versions the only machine-readable parts of a plan were that table, [CP], and the presence of Gate: lines, so whether a row was built as planned could not be judged mechanically and run compared envelope values by eye (a `quality_checks: 0/0` passed in a test drive). Placement: a seventh table column is ruled out (acceptance.py and every stage read a fixed six-column header) and a frontmatter field is ruled out (the optional list is a closed set), so the validity block is one fenced block. Its grammar is the envelope's YAML-lite: `key: value`, `- item`, two-space nesting, no flow syntax. Parsed by skills/ramo-run/scripts/acceptance.py `parse`.",
+    "row_mapping": {
+      "unit_token_regex": "\\bU[0-9]+\\b",
+      "_unit_token_why": "A non-docs, non-`other` row's Task cell names exactly one change unit. The token was already the plan's convention; this version makes it the row-to-unit mapping so no second block restates it.",
+      "unit_heading_regex": "^### (U[0-9]+)\\b",
+      "decision_row_regex": "^\\| (D[0-9]+) \\|",
+      "binding_line_regex": "^- \\*\\*Binding decisions:\\*\\*\\s*(.*)$",
+      "_binding_why": "The unit's own `Binding decisions:` line: comma-separated D-ids, or `none`. Required for every unit a mapped row names.",
+      "checks_line_regex": "^- \\*\\*Checks:\\*\\*\\s*(.*)$",
+      "_checks_why": "Optional. Each backticked command on the line is one unit check; exit 0 is a pass and the only signal. It is the unit's work definition, so the implementer sees it; what the implementer does not see is how the row is judged (the evidence invariants, the recomputed digests, the verify seats' cells).",
+      "exempt_domains": ["docs"],
+      "exempt_types": ["other"],
+      "_why": "An earlier draft carried a per-row expectation block, now retired. It asked the plan author to predict each row's evidence values before any data was seen, the predictions became the implementer's target once relayed in the delegation prompt, and rows with nothing to predict carried formal expectations such as `~ .`. The mapping is derived from what a plan already carries: the Task cell's unit token and the unit's own lines."
+    },
+    "validity": {
+      "fence": "validity",
+      "required_when": "the Execution Structure has a model-training row; forbidden otherwise",
+      "required": ["metric", "metric_direction", "slices", "baseline", "split_boundary", "seed", "wall_minutes", "anchor", "label_window", "predictions", "prediction_columns", "features"],
+      "_wall_minutes_why": "The model-training row's wall-clock budget in whole minutes, moved here from the retired row entry. A budget declaration, not a prediction of a result: it only sets the record's over_budget mark (limits.run_over_budget_factor).",
+      "optional": ["group_key", "timestamp_column", "forbidden_columns", "feature_sample", "metric_definition", "min_n", "metric_tolerance"],
+      "metric_directions": ["lower_better", "higher_better"],
+      "standard_metrics": ["mae", "mse", "rmse", "mape", "smape", "wape", "quantile_loss", "r2", "logloss", "auc", "accuracy", "f1"],
+      "_standard_metrics_why": "A metric outside this list must name a committed `module:function` in metric_definition, so the verify seat recomputes the same number instead of guessing the formula.",
+      "prediction_columns_required": ["y_true", "y_pred"],
+      "_prediction_columns_why": "`baseline` is also required in prediction_columns when the declared baseline is a column name rather than a numeric literal."
+    }
+  },
+
+  "state_records": {
+    "_why": "JSON records under .ramo/ that are derived handoffs, not state. Tracker frontmatter stays the state of record; a record exists so the next stage reads a value instead of prose.",
+    "row_evidence": {
+      "path": ".ramo/todo/{plan-stem}-evidence/row-{nn}.json",
+      "glob": ".ramo/todo/*-evidence/row-*.json",
+      "record": "ramo_row_evidence/1",
+      "written_by": ["ramo-run Step 3f", "ramo-verify Step 7.3"],
+      "_written_by_why": "The stage that ran the implementer writes the record, through acceptance.py::write_record (temp file, then os.replace). Without the verify writer a Fix round could never refresh a record, and every re-verify would read a stale value and plateau.",
+      "read_by": ["ramo-verify Step 0", "ramo-verify G1", "ramo-verify G3", "ramo-diagnose"],
+      "required": ["record", "plan", "tracker", "base_commit", "row", "cp", "unit", "domain", "type", "binding", "agent", "attempt", "written_by", "prior_verdicts", "status", "started_at", "finished_at", "wall_seconds", "expected_wall_seconds", "over_budget", "evidence", "artifacts", "changed_files_reported", "changed_files_git", "concerns", "row_check"],
+      "precedence": "tracker frontmatter",
+      "_precedence_why": "Two stores of one fact need one winner. A tracker `done` row with no PASS record, or a record ahead of its tracker, is BLOCKED (state inconsistent) as a single outcome, never a ticket and never a stop; recovery is `/ramo:run --row n`."
+    }
+  },
+
+  "scripts": {
+    "acceptance": {
+      "path": "skills/ramo-run/scripts/acceptance.py",
+      "kill_switch": "RAMO_ACCEPTANCE_GATE_ENABLED",
+      "_why": "One parser gates three stages (plan Step 2b, run Step 3f, verify Gate 3), so a parser defect would stop all three at once. Setting the variable to the string false makes `parse`, `check`, and `recheck` all exit 0 with a `gate_disabled` line and no judgment; `check` then writes no record, so run updates the tracker alone and logs `gate_disabled` in the Task Log. The script never runs a check command itself: the main session runs each command with its own Bash tool, so the pre_bash.py SQL CLI and write-boundary gates still apply, and the script only judges and records."
+    }
+  },
+
+  "limits": {
+    "command_max_lines": 10,
+    "shim_max_lines": 10,
+    "skill_single_purpose_max_lines": 80,
+    "skill_interactive_max_lines": 700,
+    "_skill_interactive_max_lines_why": "Raised from 400 alongside rule_max_lines. The 400 figure was reached exactly by both ramo-plan/SKILL.md and ramo-run/SKILL.md, so the two skills that later gained seat-specific review prompts and machine query gates had no room left. Skills already have the split the ceiling would force: every pipeline skill owns a skills/<name>/rules/ directory that carries no ceiling, so content that belongs to one step of one skill goes there and the SKILL.md body stays the step sequence. That is where a skill approaching 700 should look before this number is raised again. skill_single_purpose_max_lines stays advisory with no caller: skills carry no marker distinguishing the two classes.",
+    "rule_max_lines": 400,
+    "_rule_max_lines_why": "Raised 200 -> 240 -> 400. The ceiling exists to stop a rule becoming a grab-bag, and it should sit above the largest legitimate file with room for one more contract rather than at it. History of the two raises: 240 came when the plan-format rule first measured over 200; the next crossing was answered by the split the ceiling is there to force (workflow/01a-execution-structure.md carved the machine handoff off workflow/01-plan.md along the two-readers boundary that file had already declared in its own opening). 400 came when the DS rubric reorganization put workflow/plan-rubric.md past 240 with no responsibility boundary to split on: a long scoring checklist is one job, and holding 240 cost repeated trimming passes that shortened WHY paragraphs, which is the enforcement documentation SOT-4 exists to protect. Length is a proxy here, never the thing itself, and a file that crosses 400 should still be read as a grab-bag suspect first and a long file second. Rules are paths-scoped, so a per-file raise does not itself change what a session loads; the number that governs that is global_rules_budget_lines. No shipped check measures either number, so nothing currently measures what a session actually loads; both are reviewed when a rule grows.",
+    "claude_md_max_lines": 120,
+    "file_size_split_lines": 800,
+    "mr_size_working_lines": 400,
+    "mr_gate_marker_max_age_seconds": 3600,
+    "_mr_gate_marker_why": "How long a verify PASS marker (.ramo/context/verify-pass.json) stays valid as the precondition for opening a merge request. Longer than a lint marker's usual few minutes, because a DS verification round takes far longer than a lint run and the marker's job is to prove the verification happened for this branch, not to prove it happened moments ago. Read by pre_bash.py (the backstop that blocks `glab mr create` and `gh pr create`) and by skills/ramo-mr/SKILL.md (the full check, which also matches the plan and the commit).",
+    "mr_size_justify_lines": 800,
+    "_mr_size_why": "Changed lines of code in one merge request, excluding generated artifacts and data files. Under mr_size_working_lines is the range a reviewer reads in one sitting; over mr_size_justify_lines the MR body states why it was not split. The same two figures once had no single source and were restated in prose. They collide numerically with skill/file ceilings elsewhere in this block, which is exactly why they are named here rather than written inline (workflow/06-create-mr.md).",
+    "global_rules_budget_lines": 1500,
+    "hook_dispatch_p95_ms": 300,
+    "plan_improve_max_rounds": 3,
+    "plan_cite_repair_max": 1,
+    "_plan_cite_repair_max_why": "Citation repair passes allowed inside one review round before the remaining citations stop being repaired. The repair pass deliberately does not consume an improve round (workflow/02-review-plan.md Citation Entry Gate), and an unbounded loop with no round cost is a loop with no stopping condition at all: a citation the author cannot resolve is re-sent forever, which is the shape any agent loop has to be guarded against: a cost-sensitive batch needs a budget and an explicit stop. At the cap the leftovers become EP-P2 tickets and their anchors score as `not found`, so the plan still carries the defect and the round still ends.",
+    "run_implement_retry_max": 3,
+    "verify_fix_loop_max": 3,
+    "verify_gate_command_max_seconds": 300,
+    "_verify_gate_command_max_seconds_why": "Per-command wall-clock ceiling for the deterministic checks ramo-verify runs itself before spawning any review seat (workflow/04-verify.md Gate 3). The gate exists to take execution off the review seats, so it has to stay bounded or it just moves the wall-clock instead of removing it; an observed cycle carried a plan verification command whose own stated budget was tens of minutes, which is the class this ceiling keeps out of the main session. A command over the ceiling is named in the gate's report and left to the run that owns it, never silently skipped.",
+    "run_row_check_command_max_seconds": 300,
+    "_run_row_check_command_max_seconds_why": "Per-command wall-clock ceiling for a row's unit Checks commands, run by ramo-run Step 3f after the row's envelope returns and re-run by ramo-verify Gate 3. Its own key rather than verify_gate_command_max_seconds, whose why names the verify gate alone. A command that times out is FAIL, never PASS; a command known to run longer belongs in the plan's verification commands, not on a Checks line.",
+    "run_over_budget_factor": 2,
+    "_run_over_budget_factor_why": "A model-training row whose measured wall-clock exceeds this multiple of validity.wall_minutes is marked over_budget in its evidence record. It marks, never fails: a first fit is the measurement a budget is corrected from (rules/model/training-budget.md). Named here so the multiple is not a literal in the script and a sentence in the run skill that can disagree.",
+    "verify_probe_max_rows": 200000,
+    "_verify_probe_max_rows_why": "Row cap for the validity seats' low-cost re-derivations (target probe, slice recomputation) so a re-derivation stays a read of a committed artifact, not a second training run.",
+    "verify_target_probe_abs_corr": 0.95,
+    "_verify_target_probe_abs_corr_why": "leak.probe threshold: a single feature whose absolute rank correlation (or single-feature AUC distance from 0.5, doubled) with the target reaches this is a target-proxy leakage suspect (Kapoor & Narayanan L2).",
+    "verify_metric_tolerance": 0.0001,
+    "_verify_metric_tolerance_why": "Default absolute tolerance when eval.cells recomputes a reported metric cell from the prediction file; a plan overrides it with validity.metric_tolerance.",
+    "verify_slice_min_n": 100,
+    "_verify_slice_min_n_why": "Default minimum rows for a slice cell to be read as a result; smaller cells are reported with their n and marked, never dropped. A plan overrides it with validity.min_n.",
+    "_why": "Every number that appears in more than one asset must be cited from here; duplication is a review failure (no shipped linter checks it)."
+  }
+}
